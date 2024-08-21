@@ -1,0 +1,252 @@
+Hashmap Char Device
+
+Intro:
+
+The purpose of the module is to implement a dynamic room system.
+Each room contains a dictionary that is shared between all processes inside the
+room.
+
+The dictionary operates with { key, value } pairs.
+Processes will be able to read and write from the dictionary of their current
+room, create new rooms, move between rooms and dump the dictionary.
+
+Each process can be a part of multiple rooms.
+
+Pay attention to the *Usage* entry in each syscall specification.
+It's very important to synchronize writes and reads in each room, to not be in
+an inconsistent state.
+The system is meant to work with many processes!
+
+Intended Usage:
+
+The most notable usage of this module would be to share configurations across
+programs in a more flexible and dynamic way, when compared to environment
+variables.
+Think about a WM (window manager) that has lots of configurations that might be
+interesting to other programs, such as the task bar, lock screen, terminal
+emulator, etc.
+With HCD (Hashmap Char Device), the WM could define these configurations in a
+protected room (see HCD_O_PROTECTED below) with a common name, such as
+"HCD_INSERT_WM_NAME" (that can be stored as an env var), and all programs can
+access it. They can then request to change some configurations, and given user
+permissions these changes could take effect.
+
+Structure Definitions:
+
+#define HCD_KEYSIZE 32
+
+typedef char hcd_key[HCD_KEYSIZE];
+
+struct hcd_pair {
+        hcd_key key;
+        void *value;
+};
+
+struct hcd_create_info {
+        char *name;
+        int flags;
+};
+
+struct hcd_keys {
+        hcd_key *keys;
+        unsigned int count;
+}
+
+Resource Management:
+
+- init()
+Initializes the needed data structures to handle the rooms.
+
+- exit()
+Releases all allocated memory.
+
+- release()
+If the process is the last in the room, delete the room as if it never existed.
+
+
+Userland API:
+
+- int open(char *path, int flags)
+Description:
+        Opens a new anonymous room for the caller.
+        Ignores the flags argument.
+
+Return Value:
+        On success, returns the new file descriptor.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        ENOMEM - Insufficient kernel memory.
+
+Usage:
+        int room = open("insert_name", 0);
+
+- int close(int room)
+Description:
+        Closes the room for the caller.
+        If it was the last member of the room, release the room.
+
+Return Value:
+        On success, returns 0.
+
+Errors:
+        The module doesn't error.
+
+Usage:
+        int room = open("insert_name", 0);
+        /* do work */
+        close(room);
+
+
+- int read(int room, struct hcd_pair *pair, size_t count)
+Description:
+        Reads the value corresponding to pair->key into pair.value.
+        Reads only if count is big enough to contain the value.
+
+Return Value:
+        On success, returns 0.
+        If count is not big enough, returns the absolute size needed.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        EINVAL - no corresponding value for pair->key
+        EFAULT - pair->value is outside your accessible address space.
+
+Usage:
+        struct hcd_pair pair;
+        strncpy(pair.key, "name", sizeof(pair.key));
+        int len = read(room, &pair, 0);
+        /* error handling */
+        read(room, &pair, len);
+
+- write(int room, struct hcd_pair *pair, size_t count)
+Description:
+        Writes count bytes from pair->value to the entry associated with
+        pair->key.
+        On success, overrides the previous value (if there is).
+
+Return Value:
+        On success, returns 0.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        EPERM - no write permissions to given room
+        ENOMEM - Insufficient kernel memory.
+        EFAULT - pair.value is outside your accessible address space.
+
+Usage:
+        struct hcd_pair pair;
+        strncpy(pair.key, "name", sizeof(pair.key));
+        pair.value = "dror-ariel";
+        write(room, &pair, strlen(pair.value));
+
+
+- ioctl commands -
+
+* HCD_DELETE_ENTRY:
+Synopsis:
+int ioctl(int room, int op = HCD_DELETE_ENTRY, hcd_key *key)
+
+Description:
+        Deletes room entry associated with given key.
+
+Return Value:
+        On success, returns 0.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        ENOENT - There is no entry associated with key.
+        EFAULT - info->value is outside your accessible address space.
+        EPERM - no write permissions to given room (can't delete)
+
+Usage:
+        hcd_key key = "my_key";
+        ioctl(room, HCD_DELETE_ENTRY, &key);
+
+* HCD_CREATE_ROOM:
+Synopsis:
+        int ioctl(int room, int op = HCD_CREATE_ROOM, struct hcd_create_info *info)
+
+Description:
+        Creates a new named room with the given info->name and points to it.
+        Flags:
+                HCD_O_PUBLIC - The new room is accessible with readwrite
+                permissions to everyone.
+                HCD_O_PROTECTED - The new room is accessible with read
+                permissions to everyone and read, write, delete to the owner.
+
+Return Value:
+        On success, returns 0.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        ENOMEM - Insufficient kernel memory.
+        EEXIST - There already exists a room with the given name.
+        EFAULT - info->value is outside your accessible address space.
+
+Usage:
+        struct hcd_create_info create_info;
+        create_info.name = "my_new_room";
+        create_info.flags = HCD_O_PROTECTED;
+        ioctl(room, HCD_CREATE_ROOM, &create_info);
+
+* HCD_MOVE_ROOM:
+Synopsis:
+        int ioctl(int room, int op = HCD_MOVE_ROOM, const char *target)
+
+Description:
+        Points room to the room with the given target name.
+
+Return Value:
+        On success, returns 0.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        ENOENT - There isn't a room with the given name.
+        EFAULT - target value is outside your accessible address space.
+
+Usage:
+        ioctl(room, HCD_MOVE_ROOM, "other_room");
+
+* HCD_KEY_COUNT
+Synopsis:
+        int ioctl(int room, int op = HCD_KEY_COUNT)
+
+Description:
+        Returns the number of keys stored in the room.
+        Doesn't fail.
+
+Return Value:
+        On success, returns 0.
+
+Errors:
+        The module doesn't error.
+
+Usage:
+        int key_count = ioctl(room, HCD_KEY_COUNT);
+
+* HCD_KEY_DUMP
+Synopsis:
+        int ioctl(int room, int op = HCD_KEY_DUMP, hcd_keys *keys)
+
+Description:
+        Writes up to keys->count keys to keys->keys.
+        Order is not specified.
+
+Return Value:
+        On success, returns the amount of keys written.
+        On error, -1 is returned and errno is set to indicate the error.
+
+Errors:
+        EFAULT - target value is outside your accessible address space.
+
+Usage:
+        struct hcd_keys keys;
+        keys.keys = malloc(sizeof(hcd_key) * 10);
+        hcd_keys.count = 10;
+
+        int res = ioctl(room, HCD_KEY_DUMP, &keys);
+
+        for (int i = 0; i < res; i++) {
+                /* do work */
+        }
